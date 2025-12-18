@@ -1,0 +1,18 @@
+[package]
+name = "screen-receiver"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+warp = { version = "0.4", features = ["websocket", "server"] }
+base64 = "0.22.1"
+futures-util = "0.3"
+winres = "0.1"

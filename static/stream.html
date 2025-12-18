@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Stream</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #000;
+            min-height: 100vh;
+            color: white;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: rgba(0, 0, 0, 0.9);
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .stream-info {
+            display: flex;
+            gap: 20px;
+            font-size: 0.9rem;
+        }
+
+        .close-button {
+            background: #f44336;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .stream-container {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+
+        .stream-canvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+
+        .stream-status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h3 id="stream-title">Live Stream</h3>
+            <div class="stream-info">
+                <span id="stream-fps">FPS: 0.0</span>
+                <span id="stream-quality">Quality: undefined%</span>
+                <span id="stream-size">Size: 1920×1080</span>
+            </div>
+        </div>
+        <button class="close-button" onclick="window.close()">Close</button>
+    </div>
+    <div class="stream-container">
+        <canvas id="stream-canvas" class="stream-canvas"></canvas>
+        <div id="stream-status" class="stream-status">Connecting...</div>
+    </div>
+
+    <script>
+        // Get device ID from URL parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const deviceId = urlParams.get('deviceId');
+        const deviceName = urlParams.get('deviceName');
+        
+        if (!deviceId) {
+            document.getElementById('stream-status').textContent = 'Error: No device specified';
+        } else {
+            document.getElementById('stream-title').textContent = `${deviceName || deviceId} - Live Stream`;
+            startStream(deviceId);
+        }
+
+        let streamSocket = null;
+        let streamMetrics = {
+            framesReceived: 0,
+            lastFrameTime: Date.now(),
+            currentFPS: 0
+        };
+
+        function startStream(deviceId) {
+            document.getElementById('stream-status').textContent = 'Connecting...';
+            
+            // Get device info from API
+            fetch('/api/devices')
+                .then(response => response.json())
+                .then(devices => {
+                    const device = devices.find(d => `${d.device_info.name}_${d.client_ip}` === deviceId);
+                    if (!device || !device.is_online) {
+                        document.getElementById('stream-status').textContent = 'Error: Device is not online';
+                        return;
+                    }
+                    
+                    const canvas = document.getElementById('stream-canvas');
+                    const ctx = canvas.getContext('2d');
+                    
+                    // Set canvas size to match device resolution
+                    canvas.width = device.device_info.width;
+                    canvas.height = device.device_info.height;
+                    
+                    // Update stream info
+                    document.getElementById('stream-size').textContent = `Size: ${device.device_info.width}×${device.device_info.height}`;
+                    
+                    // Connect to stream WebSocket
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = `${protocol}//${window.location.host}/ws`;
+                    
+                    streamSocket = new WebSocket(wsUrl);
+                    streamSocket.binaryType = 'arraybuffer';
+
+                    let expectingBinary = false;
+                    let currentHeader = null;
+
+                    streamSocket.onopen = function() {
+                        console.log('Stream connected');
+                        document.getElementById('stream-status').textContent = 'Connected';
+                    };
+
+                    streamSocket.onmessage = function(event) {
+                        if (typeof event.data === 'string') {
+                            // This is a frame header (JSON)
+                            try {
+                                const message = JSON.parse(event.data);
+                                
+                                // Only process messages for this device
+                                if (message.type === 'frame' && message.device_id === deviceId) {
+                                    currentHeader = message.header;
+                                    expectingBinary = true;
+                                    
+                                    // Update stream info
+                                    document.getElementById('stream-quality').textContent = `Quality: ${currentHeader.quality}%`;
+                                    
+                                    // Update FPS
+                                    updateStreamFPS();
+                                }
+                            } catch (e) {
+                                console.error('Failed to parse frame header:', e);
+                            }
+                        } else if (expectingBinary && currentHeader) {
+                            // This is binary frame data (JPEG)
+                            expectingBinary = false;
+                            
+                            try {
+                                // Create blob from binary data and convert to image
+                                const blob = new Blob([event.data], { type: 'image/jpeg' });
+                                const img = new Image();
+                                
+                                img.onload = function() {
+                                    // Draw image to canvas
+                                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                    URL.revokeObjectURL(img.src); // Clean up
+                                };
+                                
+                                img.src = URL.createObjectURL(blob);
+                                
+                            } catch (e) {
+                                console.error('Failed to process frame data:', e);
+                            }
+                            
+                            currentHeader = null;
+                        }
+                    };
+
+                    streamSocket.onclose = function() {
+                        console.log('Stream disconnected');
+                        document.getElementById('stream-status').textContent = 'Disconnected';
+                    };
+
+                    streamSocket.onerror = function(error) {
+                        console.error('Stream error:', error);
+                        document.getElementById('stream-status').textContent = 'Connection Error';
+                    };
+
+                    // Send periodic ping to keep connection alive
+                    const pingInterval = setInterval(() => {
+                        if (streamSocket && streamSocket.readyState === WebSocket.OPEN) {
+                            streamSocket.send('ping');
+                        } else {
+                            clearInterval(pingInterval);
+                        }
+                    }, 10000);
+                })
+                .catch(error => {
+                    console.error('Failed to get device info:', error);
+                    document.getElementById('stream-status').textContent = 'Error: Failed to get device info';
+                });
+        }
+
+        function updateStreamFPS() {
+            streamMetrics.framesReceived++;
+            const now = Date.now();
+            const timeDiff = (now - streamMetrics.lastFrameTime) / 1000;
+            
+            if (timeDiff >= 1) {
+                streamMetrics.currentFPS = streamMetrics.framesReceived / timeDiff;
+                document.getElementById('stream-fps').textContent = `FPS: ${streamMetrics.currentFPS.toFixed(1)}`;
+                
+                streamMetrics.framesReceived = 0;
+                streamMetrics.lastFrameTime = now;
+            }
+        }
+
+        // Clean up when window is closed
+        window.addEventListener('beforeunload', () => {
+            if (streamSocket) {
+                streamSocket.close();
+                streamSocket = null;
+            }
+        });
+    </script>
+</body>
+</html>
